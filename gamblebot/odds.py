@@ -11,7 +11,7 @@ import requests
 
 API_BASE = "https://api.the-odds-api.com/v4"
 SPORT = "americanfootball_nfl"
-REGIONS = "us,us2"  # wider US coverage
+REGIONS = "us,us2"  # widen US coverage
 ODDS_FORMAT = "american"
 
 
@@ -55,16 +55,13 @@ def _nfl_week_window_utc(season: int, week: int, widen_days: int = 2) -> tuple[s
 
 # ---------- player-name extraction ----------
 
-_OVER_UNDER = re.compile(r"\b(Over|Under)\b", re.I)
-
 def _extract_player_name(outcome: dict) -> Optional[str]:
     """
-    Try multiple fields; sanitize cases where name=='Over' and player lives in 'description'.
-    Handles:
-      - "Patrick Mahomes Over 1.5"
-      - "Over 1.5 - Patrick Mahomes"
-      - "Over 1.5 (Patrick Mahomes)"
-      - raw participant/player/label
+    Handle books that put player in 'participant'/'player'/'description'/'label'
+    and leave name as 'Over'/'Under'. Also parse strings like:
+      - 'Patrick Mahomes Over 1.5'
+      - 'Over 1.5 - Patrick Mahomes'
+      - 'Over 1.5 (Patrick Mahomes)'
     """
     candidates = [
         outcome.get("participant"),
@@ -79,35 +76,57 @@ def _extract_player_name(outcome: dict) -> Optional[str]:
         text = raw.strip()
         if not text:
             continue
-
-        # If it's literally "Over"/"Under", skip to other fields
         if text.lower() in ("over", "under"):
             continue
 
-        # Pattern 1: "<Player> Over/Under ..."
+        # <Player> Over/Under ...
         m = re.match(r"^(?P<player>.+?)\s+(Over|Under)\b.*$", text, flags=re.I)
         if m:
             return m.group("player").strip()
-
-        # Pattern 2: "Over/Under ... - <Player>"
+        # Over/Under ... - <Player>
         m = re.match(r"^(?:Over|Under)\b.*?[-–]\s*(?P<player>.+)$", text, flags=re.I)
         if m:
             return m.group("player").strip()
-
-        # Pattern 3: "Over/Under ... (<Player>)"
+        # Over/Under ... (<Player>)
         m = re.match(r"^(?:Over|Under)\b.*?\((?P<player>.+)\)$", text, flags=re.I)
         if m:
             return m.group("player").strip()
-
-        # Pattern 4: "Over 1.5 <Player>"
+        # Over 1.5 <Player>
         m = re.match(r"^(?:Over|Under)\b.*?\s(?P<player>[A-Za-z][A-Za-z .'\-]+)$", text, flags=re.I)
         if m:
             return m.group("player").strip()
 
-        # Otherwise, treat the text as the player name
+        # Otherwise assume this string is the player
         return text
-
     return None
+
+
+def _is_two_plus(market_key: str, outcome: dict) -> tuple[bool, Optional[float]]:
+    """
+    Return (is_two_plus, line_point) where line_point is the numeric threshold if present.
+    Rules:
+      - player_tds_over: keep only 1.5 ≤ point < 2.5 (Over 1.5)
+      - player_rush_reception_tds_alternate: keep only point ≈ 2.0 (±0.01) or text says '2+'
+    """
+    pt = outcome.get("point")
+    desc_fields = [outcome.get("description"), outcome.get("label"), outcome.get("name")]
+    desc = " ".join([s for s in desc_fields if isinstance(s, str)]).lower()
+
+    try:
+        pval = float(pt) if pt is not None else None
+    except Exception:
+        pval = None
+
+    if market_key == "player_tds_over":
+        if pval is not None:
+            return (1.5 <= pval < 2.5, pval)
+        # fallback text parse
+        return (("1.5" in desc) or ("2+" in desc) or ("two or more" in desc)), pval
+
+    # alternate TD totals (rush+rec)
+    if pval is not None:
+        return (abs(pval - 2.0) < 0.01, pval)
+    return (("2+" in desc) or ("2 or more" in desc) or ("two or more" in desc)), pval
 
 
 # ---------- client ----------
@@ -144,15 +163,13 @@ class TheOddsAPIClient:
         books: Optional[Iterable[str]] = None,
     ) -> list[dict]:
         """
-        Returns a list of rows:
-        {event_id, home_team, away_team, book, player, odds, implied_prob}
+        Returns rows for **exactly 2+ TD**:
+        {event_id, home_team, away_team, book, player, odds, implied_prob, line, market}
         """
         events = self._events_for_week(season, week)
         books_set = set(b.lower() for b in books) if books else None
 
         rows: list[dict] = []
-        # Primary market = X+ touchdowns (“Over only”), want >= 1.5 for 2+
-        # Fallback = alternate rush+rec TDs where point >= 2.0
         market_order = ("player_tds_over", "player_rush_reception_tds_alternate")
 
         for ev in events:
@@ -180,17 +197,12 @@ class TheOddsAPIClient:
                             continue
                         for out in mk.get("outcomes", []):
                             price = out.get("price")
-                            point = out.get("point")
                             if price is None:
                                 continue
 
-                            # Ensure it's 2+ touchdowns
-                            if market == "player_tds_over":
-                                if point is None or float(point) < 1.5:
-                                    continue
-                            else:  # player_rush_reception_tds_alternate
-                                if point is None or float(point) < 2.0:
-                                    continue
+                            is_two_plus, line_point = _is_two_plus(market, out)
+                            if not is_two_plus:
+                                continue
 
                             player = _extract_player_name(out)
                             if not player:
@@ -205,6 +217,8 @@ class TheOddsAPIClient:
                                     "player": player,
                                     "odds": int(price),
                                     "implied_prob": american_to_implied(price),
+                                    "line": float(line_point) if line_point is not None else None,
+                                    "market": market,
                                 }
                             )
                             got_any_for_event = True
@@ -216,15 +230,13 @@ class TheOddsAPIClient:
 
 def normalize_book_odds(rows: list[dict]) -> pd.DataFrame:
     """
-    Convert the raw list from fetch_two_td_odds into a de-duped frame
-    with the columns expected by the rest of the pipeline.
-    Picks the *best* (longest) price per player across books.
+    Deduplicate to one best (longest) price per player for the **2+ TD** line.
     """
     df = pd.DataFrame(rows)
     if df.empty:
         return df
 
-    # Keep longest price (lowest implied prob) per player
+    # keep best price per player
     df = df.sort_values("implied_prob").drop_duplicates(subset=["player"], keep="first")
     return df[["player", "odds", "implied_prob"]].reset_index(drop=True)
 

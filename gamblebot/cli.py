@@ -9,6 +9,7 @@ import click
 import pandas as pd
 
 from . import data, features, model, odds, reporting, staking
+from .filters import apply_filters
 
 
 @click.group()
@@ -31,6 +32,25 @@ def main() -> None:
     is_flag=True,
     help="Print all available 2+ TD player odds (by book) for the selected week and exit.",
 )
+@click.option(
+    "--positions",
+    type=str,
+    default="RB,WR,TE",
+    show_default=True,
+    help="Comma-separated list of positions to include (e.g. RB,WR,TE or add QB).",
+)
+@click.option(
+    "--min-recent-opps",
+    type=float,
+    default=3.0,
+    show_default=True,
+    help="Minimum recent average opportunities (rush attempts + targets) over the last few games.",
+)
+@click.option(
+    "--no-exclude-injured",
+    is_flag=True,
+    help="If set, do NOT exclude players with out/doubtful/IR/etc statuses.",
+)
 def report(
     season: int,
     week: int,
@@ -42,6 +62,9 @@ def report(
     html: Optional[Path],
     png: Optional[Path],
     dump_odds: bool,
+    positions: str,
+    min_recent_opps: float,
+    no_exclude_injured: bool,
 ) -> None:
     """Generate a top-N report for 2+ TD scorer edges, or dump raw odds with --dump-odds."""
     api_key = os.environ.get("THEODDS_API_KEY")
@@ -58,20 +81,31 @@ def report(
         if df.empty:
             click.echo("No 2+ TD player odds found for the selected week/filters.")
             return
-        cols = [c for c in ["player", "book", "odds", "implied_prob", "event_id", "home_team", "away_team"] if c in df.columns]
+        cols = [c for c in ["player", "book", "odds", "implied_prob", "line", "market", "event_id", "home_team", "away_team"] if c in df.columns]
         df = df[cols].sort_values(["player", "book"]).reset_index(drop=True)
         click.echo(df.to_string(index=False))
         return
 
     # Normal pipeline
     weekly = data.load_weekly_player_stats(season, week=week)
-    td_rate = features.compute_td_rate(weekly)
-    model_df = model.add_model_probability(td_rate)
+    feats = features.compute_td_rate(weekly)
+    model_df = model.add_model_probability(feats)
+
+    # Apply filters for starters & injuries
+    pos_list = [p.strip() for p in positions.split(",") if p.strip()]
+    filtered = apply_filters(
+        model_df,
+        positions=pos_list,
+        min_recent_opps=min_recent_opps,
+        exclude_injured=(not no_exclude_injured),
+        season=season,
+        week=week,
+    )
 
     rows = client.fetch_two_td_odds(season, week, books_list)
     odds_df = odds.normalize_book_odds(rows)
 
-    merged = model_df.merge(odds_df, on="player")
+    merged = filtered.merge(odds_df, on="player")
     merged = staking.add_edge_and_stake(
         merged, kelly_fraction=kelly_fraction, unit_size=unit_size
     )
