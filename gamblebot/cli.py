@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Optional
 
 import click
+import pandas as pd
 
 from . import data, features, model, odds, reporting, staking
 
@@ -25,6 +26,11 @@ def main() -> None:
 @click.option("--csv", type=click.Path(path_type=Path), help="Export to CSV")
 @click.option("--html", type=click.Path(path_type=Path), help="Export to HTML")
 @click.option("--png", type=click.Path(path_type=Path), help="Export to PNG")
+@click.option(
+    "--dump-odds",
+    is_flag=True,
+    help="Print all available 2+ TD player odds (by book) for the selected week and exit.",
+)
 def report(
     season: int,
     week: int,
@@ -35,20 +41,35 @@ def report(
     csv: Optional[Path],
     html: Optional[Path],
     png: Optional[Path],
+    dump_odds: bool,
 ) -> None:
-    """Generate a top-N report for 2+ TD scorer edges."""
+    """Generate a top-N report for 2+ TD scorer edges, or dump raw odds with --dump-odds."""
     api_key = os.environ.get("THEODDS_API_KEY")
     if not api_key:
         raise click.UsageError("THEODDS_API_KEY environment variable not set")
 
-    weekly = data.load_weekly_player_stats(season)
+    client = odds.TheOddsAPIClient(api_key)
+    books_list = [b.strip() for b in books.split(",") if b.strip()] or None
+
+    # Dump mode: print *all* 2+ TD player odds for this week and exit
+    if dump_odds:
+        rows = client.fetch_two_td_odds(season, week, books_list)
+        df = pd.DataFrame(rows)
+        if df.empty:
+            click.echo("No 2+ TD player odds found for the selected week/filters.")
+            return
+        cols = [c for c in ["player", "book", "odds", "implied_prob", "event_id", "home_team", "away_team"] if c in df.columns]
+        df = df[cols].sort_values(["player", "book"]).reset_index(drop=True)
+        click.echo(df.to_string(index=False))
+        return
+
+    # Normal pipeline
+    weekly = data.load_weekly_player_stats(season, week=week)
     td_rate = features.compute_td_rate(weekly)
     model_df = model.add_model_probability(td_rate)
 
-    client = odds.TheOddsAPIClient(api_key)
-    books_list = [b.strip() for b in books.split(",") if b.strip()] or None
-    odds_df = client.fetch_two_td_odds(season, week, books_list)
-    odds_df = odds.normalize_book_odds(odds_df)
+    rows = client.fetch_two_td_odds(season, week, books_list)
+    odds_df = odds.normalize_book_odds(rows)
 
     merged = model_df.merge(odds_df, on="player")
     merged = staking.add_edge_and_stake(
@@ -62,3 +83,4 @@ def report(
 
 if __name__ == "__main__":  # pragma: no cover
     main()
+
