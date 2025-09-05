@@ -129,6 +129,22 @@ def _is_two_plus(market_key: str, outcome: dict) -> tuple[bool, Optional[float]]
     return (("2+" in desc) or ("2 or more" in desc) or ("two or more" in desc)), pval
 
 
+def _is_one_sack(market_key: str, outcome: dict) -> tuple[bool, Optional[float]]:
+    """Return (is_one_plus, line_point) for 1+ sack markets."""
+    pt = outcome.get("point")
+    desc_fields = [outcome.get("description"), outcome.get("label"), outcome.get("name")]
+    desc = " ".join([s for s in desc_fields if isinstance(s, str)]).lower()
+
+    try:
+        pval = float(pt) if pt is not None else None
+    except Exception:
+        pval = None
+
+    if pval is not None:
+        return (0.45 <= pval <= 1.05, pval)
+    return ("1+" in desc or "1 or more" in desc or "one or more" in desc, pval)
+
+
 # ---------- client ----------
 
 class TheOddsAPIClient:
@@ -227,16 +243,86 @@ class TheOddsAPIClient:
 
         return rows
 
+    def fetch_sack_odds(
+        self,
+        season: int,
+        week: int,
+        books: Optional[Iterable[str]] = None,
+    ) -> list[dict]:
+        """Return rows for **1+ sack** props."""
+        events = self._events_for_week(season, week)
+        books_set = set(b.lower() for b in books) if books else None
+
+        rows: list[dict] = []
+        market_order = ("player_sacks_over", "player_sacks")
+
+        for ev in events:
+            got_any = False
+            for market in market_order:
+                try:
+                    r = self.http.get(
+                        f"{API_BASE}/sports/{SPORT}/events/{ev['id']}/odds",
+                        params=self._params(markets=market),
+                        timeout=25,
+                    )
+                    if r.status_code in (404, 422):
+                        continue
+                    r.raise_for_status()
+                    data = r.json()
+                except requests.HTTPError:
+                    continue
+
+                for bm in data.get("bookmakers", []):
+                    bm_key = bm.get("key", "").lower()
+                    if books_set and bm_key not in books_set:
+                        continue
+                    for mk in bm.get("markets", []):
+                        if "sack" not in str(mk.get("key", "")):
+                            continue
+                        for out in mk.get("outcomes", []):
+                            price = out.get("price")
+                            if price is None:
+                                continue
+                            is_one, line_point = _is_one_sack(market, out)
+                            if not is_one:
+                                continue
+                            player = _extract_player_name(out)
+                            if not player:
+                                continue
+                            rows.append(
+                                {
+                                    "event_id": ev["id"],
+                                    "home_team": ev.get("home_team"),
+                                    "away_team": ev.get("away_team"),
+                                    "book": bm_key,
+                                    "player": player,
+                                    "odds": int(price),
+                                    "implied_prob": american_to_implied(price),
+                                    "line": float(line_point) if line_point is not None else None,
+                                    "market": market,
+                                }
+                            )
+                            got_any = True
+                if got_any:
+                    break
+
+        return rows
+
 
 def normalize_book_odds(rows: list[dict]) -> pd.DataFrame:
-    """
-    Deduplicate to one best (longest) price per player for the **2+ TD** line.
-    """
+    """Deduplicate to one best (longest) price per player for the **2+ TD** line."""
     df = pd.DataFrame(rows)
     if df.empty:
         return df
-
-    # keep best price per player
     df = df.sort_values("implied_prob").drop_duplicates(subset=["player"], keep="first")
     return df[["player", "odds", "implied_prob"]].reset_index(drop=True)
+
+
+def normalize_sack_odds(rows: list[dict]) -> pd.DataFrame:
+    """Deduplicate to best price per player for the **1+ sack** line."""
+    df = pd.DataFrame(rows)
+    if df.empty:
+        return df
+    df = df.sort_values("implied_prob").drop_duplicates(subset=["player"], keep="first")
+    return df[["player", "line", "odds", "implied_prob"]].reset_index(drop=True)
 
