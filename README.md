@@ -1,6 +1,6 @@
 # 2+ TD Report
 
-Generate a ranked list of NFL players with value to score **2+ touchdowns** in a given week, combining a simple Poisson model with sportsbook prices.
+Generate a ranked list of NFL players with value to score **2+ touchdowns** in a given week, combining a simple Poisson model with sportsbook prices. A parallel `sacks` command surfaces defenders with value to record **1+ sack**.
 
 ---
 
@@ -78,6 +78,24 @@ Show every posted **2+ TD** price (debug/sanity check):
 ```bash
 poetry run gamblebot report --season 2025 --week 1 --dump-odds
 ```
+
+---
+
+## 1+ Sack Report
+
+Generate a ranked list of defenders with value to record **1+ sack** in a given week:
+
+```bash
+poetry run gamblebot sacks --season <YEAR> --week <WEEK>
+```
+
+Key options mirror the touchdown report but tailored to pass rushers:
+
+* `--positions` (default: `EDGE,DL,LB`) – defensive positions to include.
+* `--min-passrush-snaps` – minimum recent pass-rush snaps to qualify.
+* `--dump-odds` – print all posted 1+ sack lines (by book) and exit.
+
+Output columns: `player`, `team`, `opponent`, `model_prob`, `line`, `odds`, `implied_prob`, `edge`, `stake_units`.
 
 ---
 

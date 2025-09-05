@@ -23,18 +23,34 @@ def format_percentage(x: float) -> str:
 
 def display_report(df: pd.DataFrame) -> None:
     table = Table(show_header=True, header_style="bold")
-    for col in ["team", "player", "model_prob", "odds", "implied_prob", "edge", "stake_units"]:
+    cols = [
+        c
+        for c in [
+            "team",
+            "player",
+            "opponent",
+            "model_prob",
+            "line",
+            "odds",
+            "implied_prob",
+            "edge",
+            "stake_units",
+        ]
+        if c in df.columns
+    ]
+    for col in cols:
         table.add_column(col)
     for _, row in df.iterrows():
-        table.add_row(
-            row["team"],
-            row["player"],
-            format_percentage(row["model_prob"]),
-            str(row["odds"]),
-            format_percentage(row["implied_prob"]),
-            format_percentage(row["edge"]),
-            f"{row['stake_units']:.2f}",
-        )
+        cells = []
+        for col in cols:
+            val = row[col]
+            if col in {"model_prob", "implied_prob", "edge"}:
+                cells.append(format_percentage(float(val)))
+            elif col == "stake_units":
+                cells.append(f"{float(val):.2f}")
+            else:
+                cells.append(str(val))
+        table.add_row(*cells)
     console.print(table)
 
 
