@@ -1,0 +1,20 @@
+[project]
+name = "gamblebot"
+version = "0.1.0"
+description = "NFL 2+ touchdown prop analysis tool"
+authors = [{name = "AutoGen"}]
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "nfl_data_py",
+    "pandas",
+    "requests-cache",
+    "click",
+    "rich",
+]
+
+[project.optional-dependencies]
+report = ["dataframe-image"]
+
+[project.scripts]
+"two-td" = "gamblebot.cli:main"
