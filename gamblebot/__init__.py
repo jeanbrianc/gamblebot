@@ -5,6 +5,7 @@ __all__ = [
     "features",
     "model",
     "odds",
+    "evaluation",
     "reporting",
     "staking",
 ]
