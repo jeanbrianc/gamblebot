@@ -8,7 +8,7 @@ from typing import Optional
 import click
 import pandas as pd
 
-from . import data, features, model, odds, reporting, staking
+from . import data, evaluation, features, model, odds, reporting, staking
 from .filters import apply_filters
 
 
@@ -27,6 +27,13 @@ def main() -> None:
 @click.option("--csv", type=click.Path(path_type=Path), help="Export to CSV")
 @click.option("--html", type=click.Path(path_type=Path), help="Export to HTML")
 @click.option("--png", type=click.Path(path_type=Path), help="Export to PNG")
+@click.option(
+    "--log",
+    type=click.Path(path_type=Path),
+    default=Path("predictions.csv"),
+    show_default=True,
+    help="Append predictions to this CSV for later evaluation.",
+)
 @click.option(
     "--dump-odds",
     is_flag=True,
@@ -61,6 +68,7 @@ def report(
     csv: Optional[Path],
     html: Optional[Path],
     png: Optional[Path],
+    log: Path,
     dump_odds: bool,
     positions: str,
     min_recent_opps: float,
@@ -111,8 +119,118 @@ def report(
     )
     merged = merged.sort_values("edge", ascending=False).head(top)
 
+    evaluation.record_predictions(merged, season=season, week=week, path=log)
     reporting.display_report(merged)
     reporting.export_report(merged, csv=csv, html=html, png=png)
+
+
+@main.command()
+@click.option("--season", type=int, required=True, help="Season year e.g. 2025")
+@click.option("--week", type=int, required=True, help="Week number")
+@click.option("--top", type=int, default=10, show_default=True, help="Top N players")
+@click.option("--books", type=str, default="", help="Comma separated list of books")
+@click.option("--kelly-fraction", type=float, default=0.5, show_default=True)
+@click.option("--unit-size", type=float, default=1.0, show_default=True)
+@click.option("--csv", type=click.Path(path_type=Path), help="Export to CSV")
+@click.option("--html", type=click.Path(path_type=Path), help="Export to HTML")
+@click.option("--png", type=click.Path(path_type=Path), help="Export to PNG")
+@click.option(
+    "--log",
+    type=click.Path(path_type=Path),
+    help="Append predictions to this CSV for later evaluation.",
+)
+@click.option(
+    "--positions",
+    type=str,
+    default="RB,WR,TE",
+    show_default=True,
+    help="Comma-separated list of positions to include (e.g. RB,WR,TE or add QB).",
+)
+@click.option(
+    "--min-recent-opps",
+    type=float,
+    default=3.0,
+    show_default=True,
+    help="Minimum recent average opportunities (rush attempts + targets) over the last few games.",
+)
+@click.option(
+    "--no-exclude-injured",
+    is_flag=True,
+    help="If set, do NOT exclude players with out/doubtful/IR/etc statuses.",
+)
+def likely(
+    season: int,
+    week: int,
+    top: int,
+    books: str,
+    kelly_fraction: float,
+    unit_size: float,
+    csv: Optional[Path],
+    html: Optional[Path],
+    png: Optional[Path],
+    log: Optional[Path],
+    positions: str,
+    min_recent_opps: float,
+    no_exclude_injured: bool,
+) -> None:
+    """Show top-N players by model probability regardless of edge."""
+    api_key = os.environ.get("THEODDS_API_KEY")
+    if not api_key:
+        raise click.UsageError("THEODDS_API_KEY environment variable not set")
+
+    client = odds.TheOddsAPIClient(api_key)
+    books_list = [b.strip() for b in books.split(",") if b.strip()] or None
+
+    weekly = data.load_weekly_player_stats(season, week=week)
+    feats = features.compute_td_rate(weekly)
+    model_df = model.add_model_probability(feats)
+
+    pos_list = [p.strip() for p in positions.split(",") if p.strip()]
+    filtered = apply_filters(
+        model_df,
+        positions=pos_list,
+        min_recent_opps=min_recent_opps,
+        exclude_injured=(not no_exclude_injured),
+        season=season,
+        week=week,
+    )
+
+    rows = client.fetch_two_td_odds(season, week, books_list)
+    odds_df = odds.normalize_book_odds(rows)
+
+    merged = filtered.merge(odds_df, on="player")
+    merged = staking.add_edge_and_stake(
+        merged, kelly_fraction=kelly_fraction, unit_size=unit_size
+    )
+    merged = merged.sort_values("model_prob", ascending=False).head(top)
+
+    if log:
+        evaluation.record_predictions(merged, season=season, week=week, path=log)
+    reporting.display_report(merged)
+    reporting.export_report(merged, csv=csv, html=html, png=png)
+
+
+@main.command()
+@click.option("--season", type=int, required=True, help="Season year e.g. 2025")
+@click.option("--week", type=int, required=True, help="Week number")
+@click.option(
+    "--log",
+    type=click.Path(path_type=Path),
+    default=Path("predictions.csv"),
+    show_default=True,
+    help="Prediction log file to evaluate.",
+)
+def evaluate(season: int, week: int, log: Path) -> None:
+    """Evaluate prior predictions for a given week."""
+    df, metrics = evaluation.evaluate_predictions(season, week, path=log)
+    if df.empty:
+        click.echo("No predictions found for that week.")
+        return
+    cols = ["player", "model_prob", "odds", "stake_units", "tds", "hit", "profit"]
+    click.echo(df[cols].to_string(index=False))
+    click.echo(
+        f"Hit rate: {metrics['hit_rate']:.1%}\nROI: {metrics['roi']:.1%}\nBrier: {metrics['brier']:.4f}"
+    )
 
 
 if __name__ == "__main__":  # pragma: no cover

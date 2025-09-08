@@ -15,7 +15,17 @@ export THEODDS_API_KEY="your_api_key_here"
 Run commands with Poetry from the project root:
 
 ```bash
+# Value-focused edge report
 poetry run gamblebot report --season <YEAR> --week <WEEK>
+
+# Highest-probability TD scorers
+poetry run gamblebot likely --season <YEAR> --week <WEEK>
+```
+
+After games are played you can evaluate logged predictions:
+
+```
+poetry run gamblebot evaluate --season <YEAR> --week <WEEK>
 ```
 
 ---
@@ -32,10 +42,19 @@ poetry run gamblebot report --season <YEAR> --week <WEEK>
 * `--csv PATH`: Export final table to CSV.
 * `--html PATH`: Export final table to HTML.
 * `--png PATH`: Export final table to PNG.
+* `--log PATH` (default: `predictions.csv`): Append predictions to this CSV for later evaluation.
 * `--dump-odds` (flag): Print **all posted 2+ TD lines** (by book) for the chosen week and exit (great for sanity checks).
 * `--positions STR` (default: `RB,WR,TE`): Comma-separated positions to include (add `QB` to include quarterbacks).
 * `--min-recent-opps FLOAT` (default: `3.0`): Minimum recent average opportunities (rush attempts + targets) over the last few games; filters out low-usage players.
 * `--no-exclude-injured` (flag): Disable the injury filter (by default, players listed as out/doubtful/IR/PUP/etc for that week are excluded).
+
+The `likely` subcommand accepts the same options (except `--dump-odds`) but sorts by `model_prob` instead of `edge`.
+
+### Evaluation
+
+* `--season INT` **(required)**: Season year to evaluate.
+* `--week INT` **(required)**: Week number to evaluate.
+* `--log PATH` (default: `predictions.csv`): Prediction log file to read.
 
 ---
 
@@ -77,6 +96,18 @@ Show every posted **2+ TD** price (debug/sanity check):
 
 ```bash
 poetry run gamblebot report --season 2025 --week 1 --dump-odds
+```
+
+List the most likely 2+ TD scorers (highest model probabilities):
+
+```bash
+poetry run gamblebot likely --season 2025 --week 1 --top 20
+```
+
+Evaluate prior predictions once results are known:
+
+```
+poetry run gamblebot evaluate --season 2025 --week 1
 ```
 
 ---
